@@ -17,6 +17,7 @@
 from __future__ import annotations
 import collections
 from math import sqrt
+import random
 
 import scipy.stats
 
@@ -24,6 +25,8 @@ import torch
 from torch import Tensor
 from tokenizers import Tokenizer
 from transformers import LogitsProcessor
+
+import torch.nn.functional as F
 
 from nltk.util import ngrams
 
@@ -39,6 +42,7 @@ class WatermarkBase:
         seeding_scheme: str = "simple_1",  # mostly unused/always default
         hash_key: int = 15485863,  # just a large prime number to create a rng seed with sufficient bit width
         select_green_tokens: bool = True,
+        tokenizer = None,
     ):
 
         # watermarking parameters
@@ -50,6 +54,7 @@ class WatermarkBase:
         self.rng = None
         self.hash_key = hash_key
         self.select_green_tokens = select_green_tokens
+        self.tokenizer = tokenizer
 
     def _seed_rng(self, input_ids: torch.LongTensor, seeding_scheme: str = None) -> None:
         # can optionally override the seeding scheme,
@@ -280,3 +285,99 @@ class WatermarkDetector(WatermarkBase):
                 output_dict["confidence"] = 1 - score_dict["p_value"]
 
         return output_dict
+
+
+class WatermarkHammingLogitsProcessor(WatermarkLogitsProcessor, LogitsProcessor, ):
+    hamming_codewords = {
+        0 : [0, 0, 0, 0, 0, 0, 0],
+        1 : [0, 0, 0, 0, 1, 1, 1],
+        2 : [0, 0, 1, 1, 0, 0, 1],
+        3 : [0, 0, 1, 1, 1, 1, 0],
+        4 : [0, 1, 0, 1, 0, 1, 0],
+        5 : [0, 1, 0, 1, 1, 0, 1],
+        6 : [0, 1, 1, 0, 0, 1, 1],
+        7 : [0, 1, 1, 0, 1, 0, 0],
+        8 : [1, 0, 0, 1, 0, 1, 1],
+        9 : [1, 0, 0, 1, 1, 0, 0],
+        10 : [1, 0, 1, 0, 0, 1, 0],
+        11 : [1, 0, 1, 0, 1, 0, 1],
+        12 : [1, 1, 0, 0, 0, 0, 1],
+        13 : [1, 1, 0, 0, 1, 1, 0],
+        14 : [1, 1, 1, 1, 0, 0, 0],
+        15 : [1, 1, 1, 1, 1, 1, 1]
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.iter = 0
+        self.codeword = self.hamming_codewords[random.randint(0, 15)]
+
+
+    def _pick_greenlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor) -> torch.Tensor:
+        # The minimum is usually not more than -20
+        red_mask = ~greenlist_mask
+        scores[red_mask] = -30
+        return scores
+
+    def _pick_redlist_logits(self, scores: torch.Tensor, greenlist_mask: torch.Tensor) -> torch.Tensor:
+        scores[greenlist_mask] = -30
+        return scores
+    
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        # this is lazy to allow us to colocate on the watermarked model's device
+        if self.rng is None:
+            self.rng = torch.Generator(device=input_ids.device)
+
+        
+        #Calculate greenlist
+        batched_greenlist_ids = [None for _ in range(input_ids.shape[0])]
+
+        for b_idx in range(input_ids.shape[0]):
+            greenlist_ids = self._get_greenlist_ids(input_ids[b_idx])
+            batched_greenlist_ids[b_idx] = greenlist_ids
+
+        green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
+
+        #generate a new keyword when we are at the end of the old one
+        if self.iter == 7:
+            self.codeword = self.hamming_codewords[random.randint(0, 15)]
+            self.iter = 0
+
+        #Green word
+        if self.codeword[self.iter] == 1:
+           scores = self._pick_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask)
+        
+        #Red word
+        else:
+           scores = self._pick_redlist_logits(scores=scores, greenlist_mask=green_tokens_mask)
+
+        self.iter += 1
+        scores = self._pick_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask)
+
+        return scores
+
+class HammingProcessor():
+    hamming_codewords = {
+        0 : [0, 0, 0, 0, 0, 0, 0],
+        1 : [0, 0, 0, 0, 1, 1, 1],
+        2 : [0, 0, 1, 1, 0, 0, 1],
+        3 : [0, 0, 1, 1, 1, 1, 0],
+        4 : [0, 1, 0, 1, 0, 1, 0],
+        5 : [0, 1, 0, 1, 1, 0, 1],
+        6 : [0, 1, 1, 0, 0, 1, 1],
+        7 : [0, 1, 1, 0, 1, 0, 0],
+        8 : [1, 0, 0, 1, 0, 1, 1],
+        9 : [1, 0, 0, 1, 1, 0, 0],
+        10 : [1, 0, 1, 0, 0, 1, 0],
+        11 : [1, 0, 1, 0, 1, 0, 1],
+        12 : [1, 1, 0, 0, 0, 0, 1],
+        13 : [1, 1, 0, 0, 1, 1, 0],
+        14 : [1, 1, 1, 1, 0, 0, 0],
+        15 : [1, 1, 1, 1, 1, 1, 1]
+    }
+
+    def generateHammingCodeword(self):
+        return self.hamming_codewords[random.randint(0, 15)]
+
+    def checkIfCorrectColor(self, token, color, greenlist_mask):
+        return greenlist_mask[0][token.item()] == bool(color)

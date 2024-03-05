@@ -18,12 +18,12 @@ from argparse import Namespace
 args = Namespace()
 
 arg_dict = {
-    'run_gradio': True, 
+    'run_gradio': False, 
     'demo_public': False, 
-    # 'model_name_or_path': 'facebook/opt-125m', 
+     'model_name_or_path': 'facebook/opt-125m', 
     # 'model_name_or_path': 'facebook/opt-1.3b', 
     # 'model_name_or_path': 'facebook/opt-2.7b', 
-    'model_name_or_path': 'facebook/opt-6.7b',
+    # 'model_name_or_path': 'facebook/opt-6.7b',
     # 'model_name_or_path': 'facebook/opt-13b',
     # 'load_fp16' : True,
     'load_fp16' : False,

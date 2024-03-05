@@ -30,7 +30,7 @@ from transformers import (AutoTokenizer,
                           AutoModelForCausalLM,
                           LogitsProcessorList)
 
-from watermark_processor import WatermarkLogitsProcessor, WatermarkDetector
+from watermark_processor import WatermarkHammingLogitsProcessor, WatermarkLogitsProcessor, WatermarkDetector, HammingProcessor
 
 def str2bool(v):
     """Util function for user friendly boolean flag args"""
@@ -211,7 +211,15 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
                                                     gamma=args.gamma,
                                                     delta=args.delta,
                                                     seeding_scheme=args.seeding_scheme,
-                                                    select_green_tokens=args.select_green_tokens)
+                                                    select_green_tokens=args.select_green_tokens, 
+                                                    tokenizer=tokenizer)
+
+    # watermark_processor = WatermarkHammingLogitsProcessor(vocab=list(tokenizer.get_vocab().values()),
+    #                                                     gamma=args.gamma,
+    #                                                     delta=args.delta,
+    #                                                     seeding_scheme=args.seeding_scheme,
+    #                                                     select_green_tokens=args.select_green_tokens, 
+    #                                                     tokenizer=tokenizer)
 
     gen_kwargs = dict(max_new_tokens=args.max_new_tokens)
 
@@ -235,6 +243,7 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
         logits_processor=LogitsProcessorList([watermark_processor]), 
         **gen_kwargs
     )
+
     if args.prompt_max_length:
         pass
     elif hasattr(model.config,"max_position_embedding"):
@@ -246,22 +255,100 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
     truncation_warning = True if tokd_input["input_ids"].shape[-1] == args.prompt_max_length else False
     redecoded_input = tokenizer.batch_decode(tokd_input["input_ids"], skip_special_tokens=True)[0]
 
+    #print(tokd_input['input_ids'].shape[1])
+    # output_with_watermark = generate_with_watermark(**tokd_input, return_dict_in_generate=True, output_scores=True)
+    # tokens = output_with_watermark.sequences
+    # logits = output_with_watermark.scores
+    # print(len(logits))
+    # print(tokens[0].shape)
+    # print("*****************************")
+    # print(tokenizer.batch_decode(tokens, skip_special_tokens=True))
+    # print("----------------")
+
+
     torch.manual_seed(args.generation_seed)
     output_without_watermark = generate_without_watermark(**tokd_input)
 
     # optional to seed before second generation, but will not be the same again generally, unless delta==0.0, no-op watermark
     if args.seed_separately: 
         torch.manual_seed(args.generation_seed)
-    output_with_watermark = generate_with_watermark(**tokd_input)
+    output_with_watermark = generate_with_watermark(**tokd_input, return_dict_in_generate=True, output_scores=True)
+    tokens = output_with_watermark.sequences
+    logits = output_with_watermark.scores
+    #print(logits[-1])
+
+    #print(logits)
+    #print(tokd_input["input_ids"])
+
+    base_index = tokd_input['input_ids'].shape[1]
+    current_index = 0
+
+    
+
+    hammingProcessor = HammingProcessor()
+    codeword = hammingProcessor.generateHammingCodeword()
+    iter = 0
+
+    input_ids = tokd_input["input_ids"][:base_index+current_index]
+
+
+
+    #for logit in logits:
+    for i in range(args.max_new_tokens):
+        #calc green list
+        greenlist_ids = watermark_processor._get_greenlist_ids(tokd_input["input_ids"][0][:base_index+current_index])
+        green_list_mask = watermark_processor._calc_greenlist_mask(logits[-1], [greenlist_ids])
+
+        logit = model(input_ids)[0]
+        print(logit)
+
+
+        #softmax the logits
+        p = torch.nn.functional.softmax(logit, dim=1)
+
+        #sample first token
+        sampled_token = torch.multinomial(p, num_samples=1)
+        print(f"Token real: {tokenizer.decode(tokens[0][base_index + current_index], skip_special_tokens=True)} \
+                Token real p: {logit[0][tokens[0][base_index + current_index]]}\
+                Token selected: {tokenizer.decode(sampled_token.item(), skip_special_tokens=True)} \
+                Token selected p: {logit[0][sampled_token.item()]} \
+                ")
+
+        #check to make sure following color pattern, if not then resample
+        k = 2
+        while not hammingProcessor.checkIfCorrectColor(sampled_token, codeword[iter], green_list_mask):   
+            sampled_token = torch.multinomial(p, num_samples=k)[0][-1]
+            k+=1
+
+        #set the sequence generated to the word generated
+        tokens[0][base_index + current_index] = sampled_token.item()
+
+        #update indeces
+        current_index += 1
+
+        if iter == 6:
+            codeword = hammingProcessor.generateHammingCodeword()
+            iter = 0
+        else:
+            iter += 1
+
+
+    #print(tokenizer.batch_decode(output_with_watermark, skip_special_tokens=True))
+    #print("------------------\n")
+    #print(f"Decoded with hamming: {tokenizer.batch_decode(tokens, skip_special_tokens=True)[:,base_index:]}")
+    #print("---------------------")
+    #print("\n")
 
     if args.is_decoder_only_model:
         # need to isolate the newly generated tokens
         output_without_watermark = output_without_watermark[:,tokd_input["input_ids"].shape[-1]:]
-        output_with_watermark = output_with_watermark[:,tokd_input["input_ids"].shape[-1]:]
+        output_with_watermark = tokens[:,tokd_input["input_ids"].shape[-1]:]
+    
 
     decoded_output_without_watermark = tokenizer.batch_decode(output_without_watermark, skip_special_tokens=True)[0]
     decoded_output_with_watermark = tokenizer.batch_decode(output_with_watermark, skip_special_tokens=True)[0]
-
+    #print(decoded_output_without_watermark)
+    print(decoded_output_with_watermark)
     return (redecoded_input,
             int(truncation_warning),
             decoded_output_without_watermark, 
@@ -650,6 +737,8 @@ def main(args):
         "feet.[9] The species is"
         )
 
+        
+
         args.default_prompt = input_text
 
         term_width = 80
@@ -657,35 +746,36 @@ def main(args):
         print("Prompt:")
         print(input_text)
 
+
         _, _, decoded_output_without_watermark, decoded_output_with_watermark, _ = generate(input_text, 
                                                                                             args, 
                                                                                             model=model, 
                                                                                             device=device, 
                                                                                             tokenizer=tokenizer)
-        without_watermark_detection_result = detect(decoded_output_without_watermark, 
-                                                    args, 
-                                                    device=device, 
-                                                    tokenizer=tokenizer)
-        with_watermark_detection_result = detect(decoded_output_with_watermark, 
-                                                 args, 
-                                                 device=device, 
-                                                 tokenizer=tokenizer)
+        # without_watermark_detection_result = detect(decoded_output_without_watermark, 
+        #                                             args, 
+        #                                             device=device, 
+        #                                             tokenizer=tokenizer)
+        # with_watermark_detection_result = detect(decoded_output_with_watermark, 
+        #                                          args, 
+        #                                          device=device, 
+        #                                          tokenizer=tokenizer)
 
-        print("#"*term_width)
-        print("Output without watermark:")
-        print(decoded_output_without_watermark)
-        print("-"*term_width)
-        print(f"Detection result @ {args.detection_z_threshold}:")
-        pprint(without_watermark_detection_result)
-        print("-"*term_width)
+        # print("#"*term_width)
+        # print("Output without watermark:")
+        # print(decoded_output_without_watermark)
+        # print("-"*term_width)
+        # print(f"Detection result @ {args.detection_z_threshold}:")
+        # pprint(without_watermark_detection_result)
+        # print("-"*term_width)
 
-        print("#"*term_width)
-        print("Output with watermark:")
-        print(decoded_output_with_watermark)
-        print("-"*term_width)
-        print(f"Detection result @ {args.detection_z_threshold}:")
-        pprint(with_watermark_detection_result)
-        print("-"*term_width)
+        # print("#"*term_width)
+        # print("Output with watermark:")
+        # print(decoded_output_with_watermark)
+        # print("-"*term_width)
+        # print(f"Detection result @ {args.detection_z_threshold}:")
+        # pprint(with_watermark_detection_result)
+        # print("-"*term_width)
 
 
     # Launch the app to generate and detect interactively (implements the hf space demo)
