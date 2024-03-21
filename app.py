@@ -35,7 +35,7 @@ arg_dict = {
     'sampling_temp': 0.7, 
     'use_gpu': True, 
     'seeding_scheme': 'simple_1', 
-    'gamma': 0.25, 
+    'gamma': 0.5, 
     'delta': 2.0, 
     'normalizers': '', 
     'ignore_repeated_bigrams': False, 
@@ -43,6 +43,7 @@ arg_dict = {
     'select_green_tokens': True,
     'skip_model_load': False,
     'seed_separately': True,
+    'hamming_encoding': True,
 }
 
 args.__dict__.update(arg_dict)
