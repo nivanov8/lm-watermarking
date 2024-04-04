@@ -286,8 +286,10 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
         current_index = 0
 
         hammingProcessor = HammingProcessor()
-        codeword = hammingProcessor.generateHammingCodeword()
+        codeword = None
         iter = 0
+        buffer = []
+        codeword_iter = 0
 
         input_ids = tokd_input["input_ids"][:base_index+current_index]
 
@@ -319,16 +321,35 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
 
             #CODE: 1- Green 0 - Red
             #check to make sure following color pattern, if not then resample
-            k = 1
-            while not hammingProcessor.checkIfCorrectColor(sampled_token, codeword[iter], green_list_mask):   
-                sampled_token = torch.multinomial(p, num_samples=k, replacement=False)[-1]
-                #print(f"tensor: {sampled_token} | last token: {sampled_token[-1]}")
-                #print(p.shape)
-                print(f"k: {k} | hamming color: {codeword[iter]} | color word sampled: {green_list_mask[0][sampled_token.item()]}")
-                k+=1
+            #print(f"buffer: {buffer}")
+
+            if iter == 4:
+                codeword = hammingProcessor.generateHammingCodeword(buffer)
+                buffer.clear()
+            elif iter <= 4:
+                buffer.append(int(green_list_mask[0][sampled_token.item()]))
+
+            #print(f"codeword: {codeword}")
+
+            if iter >= 4: 
+                k = 1
+                while not hammingProcessor.checkIfCorrectColor(sampled_token, codeword[codeword_iter], green_list_mask):   
+                    sampled_token = torch.multinomial(p, num_samples=k, replacement=False)[-1]
+                    #print(f"tensor: {sampled_token} | last token: {sampled_token[-1]}")
+                    #print(p.shape)
+                    print(f"k: {k} | hamming color: {codeword[codeword_iter]} | color word sampled: {green_list_mask[0][sampled_token.item()]}")
+                    k+=1
+
+                codeword_iter += 1
+
 
             print(f"Token selected: {tokenizer.decode(sampled_token.item(), skip_special_tokens=True)} | Token selected p: {p[sampled_token.item()]} | " + 
-                  f"max token: {tokenizer.decode(torch.argmax(p).item(), skip_special_tokens=True)} | token probability: {max(p)}")
+                    f"max token: {tokenizer.decode(torch.argmax(p).item(), skip_special_tokens=True)} | token probability: {max(p)}")
+            if iter == 6:
+                iter = 0
+                codeword_iter = 0
+            else:
+                iter += 1
 
             #set the sequence generated to the word generated
             #tokens[0][base_index + current_index] = sampled_token.item()
@@ -338,12 +359,6 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
 
             #update indeces
             current_index += 1
-
-            if iter == 6:
-                codeword = hammingProcessor.generateHammingCodeword()
-                iter = 0
-            else:
-                iter += 1
 
             #print(input_ids[0].shape)
             #print(input_ids.shape)

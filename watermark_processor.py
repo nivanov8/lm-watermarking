@@ -30,6 +30,8 @@ import torch.nn.functional as F
 
 from nltk.util import ngrams
 
+import numpy as np
+
 from normalizers import normalization_strategy_lookup
 
 
@@ -375,8 +377,15 @@ class HammingProcessor():
         15 : [1, 1, 1, 1, 1, 1, 1]
     }
 
-    def generateHammingCodeword(self):
-        return self.hamming_codewords[random.randint(0, 15)]
+    G = np.matrix([[1, 1, 0], [1, 0, 1], [0, 1, 1], [1, 1, 1]])
+
+    H = np.matrix([[1, 1, 0, 1, 1, 0, 0], [1, 0, 1, 1, 0, 1, 0], [0, 1, 1, 1, 0, 0, 1]])
+
+    def generateHammingCodeword(self, buffer):
+        mat = np.array(buffer)
+        result = np.matmul(mat, self.G)
+        result = result % 2
+        return result.tolist()[0]
 
     def checkIfCorrectColor(self, token, color, greenlist_mask):
         return greenlist_mask[0][token.item()] == bool(color)
