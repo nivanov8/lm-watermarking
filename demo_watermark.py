@@ -16,6 +16,7 @@
 
 import os
 import argparse
+import re
 from argparse import Namespace
 from pprint import pprint
 from functools import partial
@@ -32,7 +33,7 @@ from transformers import (AutoTokenizer,
                           AutoModelForCausalLM,
                           LogitsProcessorList)
 
-from watermark_processor import WatermarkHammingLogitsProcessor, WatermarkLogitsProcessor, WatermarkDetector, HammingProcessor
+from watermark_processor import WatermarkLogitsProcessor, WatermarkDetector, HammingProcessor, HammingDetector
 
 def str2bool(v):
     """Util function for user friendly boolean flag args"""
@@ -283,7 +284,7 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
         #print(logits[-1])
 
         base_index = tokd_input['input_ids'].shape[1]
-        current_index = 0
+
 
         hammingProcessor = HammingProcessor()
         codeword = None
@@ -291,7 +292,8 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
         buffer = []
         codeword_iter = 0
 
-        input_ids = tokd_input["input_ids"][:base_index+current_index]
+        input_ids = tokd_input["input_ids"][:base_index]
+        input_so_far = torch.Tensor().to(device=input_ids.device)
 
         if watermark_processor.rng is None:
             watermark_processor.rng = torch.Generator(device=input_ids.device)
@@ -301,6 +303,7 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
         #for logit in logits:
         # for i in range(args.max_new_tokens):
         for i in range(200):
+            #print(input_ids)
             logit = model(input_ids).logits[0, -1, :]
 
             #print(tokenizer.batch_decode(tokd_input["input_ids"][0][:base_index+current_index], skip_special_tokens=True))
@@ -322,51 +325,55 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
             #CODE: 1- Green 0 - Red
             #check to make sure following color pattern, if not then resample
             #print(f"buffer: {buffer}")
+            if i != 0:
 
-            if iter == 4:
-                codeword = hammingProcessor.generateHammingCodeword(buffer)
-                buffer.clear()
-            elif iter <= 4:
-                buffer.append(int(green_list_mask[0][sampled_token.item()]))
+                if iter == 4:
+                    codeword = hammingProcessor.generateHammingCodeword(buffer)
+                    
+                    
+                elif iter <= 4:
+                    buffer.append(int(green_list_mask[0][sampled_token.item()]))
 
-            #print(f"codeword: {codeword}")
+                #print(f"codeword: {codeword}")
 
-            if iter >= 4: 
-                k = 1
-                while not hammingProcessor.checkIfCorrectColor(sampled_token, codeword[codeword_iter], green_list_mask):   
-                    sampled_token = torch.multinomial(p, num_samples=k, replacement=False)[-1]
-                    #print(f"tensor: {sampled_token} | last token: {sampled_token[-1]}")
-                    #print(p.shape)
-                    print(f"k: {k} | hamming color: {codeword[codeword_iter]} | color word sampled: {green_list_mask[0][sampled_token.item()]}")
-                    k+=1
+                if iter >= 4: 
+                    k = 1
+                    while not hammingProcessor.checkIfCorrectColor(sampled_token, codeword[codeword_iter], green_list_mask):   
+                        sampled_token = torch.multinomial(p, num_samples=k, replacement=False)[-1]
+                        #print(f"tensor: {sampled_token} | last token: {sampled_token[-1]}")
+                        #print(p.shape)
+                        #print(f"k: {k} | hamming color: {codeword[codeword_iter]} | color word sampled: {green_list_mask[0][sampled_token.item()]}")
+                        k+=1
 
-                codeword_iter += 1
+                    codeword_iter += 1
+
+                #print(sampled_token in greenlist_ids)
+                #print(f"Token selected: {tokenizer.decode(sampled_token.item(), skip_special_tokens=True)} | Token selected p: {p[sampled_token.item()]} | " + 
+                        #f"max token: {tokenizer.decode(torch.argmax(p).item(), skip_special_tokens=True)} | token probability: {max(p)}")
+                if iter == 6:
+                    iter = 0
+                    codeword_iter = 0
+                    #print(buffer + codeword)
+                    buffer.clear()
+                    
+                else:
+                    iter += 1
+
+                #set the sequence generated to the word generated
+                #tokens[0][base_index + current_index] = sampled_token.item()
+
+                #print(input_ids[0].shape)
+                #print(input_ids.shape)
 
 
-            print(f"Token selected: {tokenizer.decode(sampled_token.item(), skip_special_tokens=True)} | Token selected p: {p[sampled_token.item()]} | " + 
-                    f"max token: {tokenizer.decode(torch.argmax(p).item(), skip_special_tokens=True)} | token probability: {max(p)}")
-            if iter == 6:
-                iter = 0
-                codeword_iter = 0
-            else:
-                iter += 1
-
-            #set the sequence generated to the word generated
-            #tokens[0][base_index + current_index] = sampled_token.item()
-
-            if sampled_token.item() == tokenizer.eos_token_id:
-                break
-
-            #update indeces
-            current_index += 1
-
-            #print(input_ids[0].shape)
-            #print(input_ids.shape)
         
             sampled_token_tensor = torch.tensor([sampled_token.item()], dtype=torch.long, device=input_ids.device)
             #print(sampled_token_tensor)
             input_ids_concatenated = torch.cat([input_ids[0], sampled_token_tensor], dim=-1)
             input_ids = torch.unsqueeze(input_ids_concatenated, dim=0)
+
+            if sampled_token.item() == tokenizer.eos_token_id:
+                break
             #print(input_ids.shape)
             #print(input_ids)
             #print(input_ids_concatenated)
@@ -433,7 +440,16 @@ def list_format_scores(score_dict, detection_threshold):
 def detect(input_text, args, device=None, tokenizer=None):
     """Instantiate the WatermarkDetection object and call detect on
         the input text returning the scores and outcome of the test"""
-    watermark_detector = WatermarkDetector(vocab=list(tokenizer.get_vocab().values()),
+    # watermark_detector = WatermarkDetector(vocab=list(tokenizer.get_vocab().values()),
+    #                                     gamma=args.gamma,
+    #                                     seeding_scheme=args.seeding_scheme,
+    #                                     device=device,
+    #                                     tokenizer=tokenizer,
+    #                                     z_threshold=args.detection_z_threshold,
+    #                                     normalizers=args.normalizers,
+    #                                     ignore_repeated_bigrams=args.ignore_repeated_bigrams,
+    #                                     select_green_tokens=args.select_green_tokens)
+    watermark_detector = HammingDetector(vocab=list(tokenizer.get_vocab().values()),
                                         gamma=args.gamma,
                                         seeding_scheme=args.seeding_scheme,
                                         device=device,
@@ -450,7 +466,7 @@ def detect(input_text, args, device=None, tokenizer=None):
         # output = (f"Error: string not long enough to compute watermark presence.")
         output = [["Error","string too short to compute metrics"]]
         output += [["",""] for _ in range(6)]
-    return output, args
+    return output, score_dict, args
 
 def run_gradio(args, model=None, device=None, tokenizer=None):
     """Define and launch the gradio demo interface"""
@@ -756,84 +772,118 @@ def main(args):
 
     # Generate and detect, report to stdout
     if not args.skip_model_load:
-        input_text = (
-        "The diamondback terrapin or simply terrapin (Malaclemys terrapin) is a "
-        "species of turtle native to the brackish coastal tidal marshes of the "
-        "Northeastern and southern United States, and in Bermuda.[6] It belongs "
-        "to the monotypic genus Malaclemys. It has one of the largest ranges of "
-        "all turtles in North America, stretching as far south as the Florida Keys "
-        "and as far north as Cape Cod.[7] The name 'terrapin' is derived from the "
-        "Algonquian word torope.[8] It applies to Malaclemys terrapin in both "
-        "British English and American English. The name originally was used by "
-        "early European settlers in North America to describe these brackish-water "
-        "turtles that inhabited neither freshwater habitats nor the sea. It retains "
-        "this primary meaning in American English.[8] In British English, however, "
-        "other semi-aquatic turtle species, such as the red-eared slider, might "
-        "also be called terrapins. The common name refers to the diamond pattern "
-        "on top of its shell (carapace), but the overall pattern and coloration "
-        "vary greatly. The shell is usually wider at the back than in the front, "
-        "and from above it appears wedge-shaped. The shell coloring can vary "
-        "from brown to grey, and its body color can be grey, brown, yellow, "
-        "or white. All have a unique pattern of wiggly, black markings or spots "
-        "on their body and head. The diamondback terrapin has large webbed "
-        "feet.[9] The species is"
-        )
+        # input_text = (
+        # "The diamondback terrapin or simply terrapin (Malaclemys terrapin) is a "
+        # "species of turtle native to the brackish coastal tidal marshes of the "
+        # "Northeastern and southern United States, and in Bermuda.[6] It belongs "
+        # "to the monotypic genus Malaclemys. It has one of the largest ranges of "
+        # "all turtles in North America, stretching as far south as the Florida Keys "
+        # "and as far north as Cape Cod.[7] The name 'terrapin' is derived from the "
+        # "Algonquian word torope.[8] It applies to Malaclemys terrapin in both "
+        # "British English and American English. The name originally was used by "
+        # "early European settlers in North America to describe these brackish-water "
+        # "turtles that inhabited neither freshwater habitats nor the sea. It retains "
+        # "this primary meaning in American English.[8] In British English, however, "
+        # "other semi-aquatic turtle species, such as the red-eared slider, might "
+        # "also be called terrapins. The common name refers to the diamond pattern "
+        # "on top of its shell (carapace), but the overall pattern and coloration "
+        # "vary greatly. The shell is usually wider at the back than in the front, "
+        # "and from above it appears wedge-shaped. The shell coloring can vary "
+        # "from brown to grey, and its body color can be grey, brown, yellow, "
+        # "or white. All have a unique pattern of wiggly, black markings or spots "
+        # "on their body and head. The diamondback terrapin has large webbed "
+        # "feet.[9] The species is"
+        # )
 
-        # realnewslike = load_dataset("allenai/c4", "realnewslike", streaming=True)
-        # dataset = realnewslike["train"]
-        # num_examples = 1
-        # for example in dataset:
-
-        #     if num_examples == 10:
-        #         return
-        #     raw_text = example['text']
-        #     truncate_position = len(raw_text)*2//3
-        #     while raw_text[truncate_position] != " ":
-        #         truncate_position -= 1
+        # input_text = (" including the Denver School District and Colorado's K-12 charter school programs."
+        #             "We are looking toward a long-term improvement plan that will position the city for a better outcome and create learning opportunities for students and employees throughout the future."
+        #             "As with all projects, Denver's Board of Education will review and revisit these processes as programs are implemented in schools."
+        #             "We look forward to serving students and teachers with a unique experience in a multi-year school year. We are confident that this bond will provide the funding to meet these needs and we are committed to continuing our work to ensure all Denver school districts have the quality and accessible education that all schools deserve."
+        #             "Gavin Melton, District Executive, School District of Denver \"What we need is a wise, responsible and transparent administration to allow these schools and their employees the opportunity to thrive,\" Melton said. \"These projects are critical to our children and our district and "
+        #             "we are committed that our communities support them.\" Aldren Ruth Sall")
+        
+        #input_text = "Biomedics 1 Day Extra are daily replacement disposable contact lenses by CooperVision Hydron. Buy one box of 90 lenses. Biomedics 1 Day Extra contacts give you all the convenience of a daily disposable lens with no need for solutions, cases or cleaning and are perfect for the occasional wear. These lenses have greater comfort handling with superior ease of insertion and"
+        realnewslike = load_dataset("allenai/c4", "realnewslike", streaming=True)
+        dataset = realnewslike["train"]
+        num_examples = 1
+        stats = []
+        for example in dataset:
+            print(num_examples)
+            if num_examples == 50:
+                return
+            raw_text = example['text']
+            words = raw_text.split()
+            words = words[:200]
+            input_text = ' '.join(words)
             
-        #     input_text = raw_text[:truncate_position]
+            input_text = remove_special_characters(input_text).replace("\n", " ")
+
+            args.default_prompt = input_text
+
+            term_width = 80
+            print("#"*term_width)
+            print("Prompt:")
+            print(input_text)
 
         
 
-        args.default_prompt = input_text
+            #rint(f"decoded1: {tokenizer.batch_decode(tensor_data)}")
+            #print(f"decoded2: {tokenizer.batch_decode(tensor_data2)}")
+            # print(tokenizer.decode(6479))
+            # print(tokenizer.decode(7486))
+            # print(tokenizer.decode(3204))
+            # print(tokenizer.decode(163))
+            # print(tokenizer.decode(6009))
+            # print(tokenizer.decode(196))
+            # print(tokenizer.decode(3204))
 
-        term_width = 80
-        print("#"*term_width)
-        print("Prompt:")
-        print(input_text)
-
-
-        _, _, decoded_output_without_watermark, decoded_output_with_watermark, _ = generate(input_text, 
-                                                                                            args, 
-                                                                                            model=model, 
-                                                                                            device=device, 
-                                                                                            tokenizer=tokenizer)
-        without_watermark_detection_result = detect(decoded_output_without_watermark, 
+            _, _, decoded_output_without_watermark, decoded_output_with_watermark, _ = generate(input_text, 
+                                                                                                args, 
+                                                                                                model=model, 
+                                                                                                device=device, 
+                                                                                                tokenizer=tokenizer)
+            without_watermark_detection_result, score_dict_unwatermarked, args = detect(decoded_output_without_watermark, 
+                                                        args, 
+                                                        device=device, 
+                                                        tokenizer=tokenizer)
+            
+            with_watermark_detection_result, score_dict_watermarked, args = detect(decoded_output_with_watermark, 
                                                     args, 
                                                     device=device, 
                                                     tokenizer=tokenizer)
-        with_watermark_detection_result = detect(decoded_output_with_watermark, 
-                                                args, 
-                                                device=device, 
-                                                tokenizer=tokenizer)
+            
 
-        print("#"*term_width)
-        print("Output without watermark:")
-        print(decoded_output_without_watermark)
-        print("-"*term_width)
-        print(f"Detection result @ {args.detection_z_threshold}:")
-        pprint(without_watermark_detection_result)
-        print("-"*term_width)
 
-        print("#"*term_width)
-        print("Output with watermark:")
-        print(decoded_output_with_watermark)
-        print("-"*term_width)
-        print(f"Detection result @ {args.detection_z_threshold}:")
-        pprint(with_watermark_detection_result)
-        print("-"*term_width)
+            stats.append((score_dict_unwatermarked["is_hamming"], score_dict_watermarked["is_hamming"]))
+            print(stats)
+    
+            print("#"*term_width)
+            print("Output without watermark:")
+            print(decoded_output_without_watermark)
+            print("-"*term_width)
+            print(f"Detection result @ {args.detection_z_threshold}:")
+            pprint(without_watermark_detection_result)
+            print("-"*term_width)
 
-            # num_examples += 1
+            print("#"*term_width)
+            print("Output with watermark:")
+            print(decoded_output_with_watermark)
+            print("-"*term_width)
+            print(f"Detection result @ {args.detection_z_threshold}:")
+            pprint(with_watermark_detection_result)
+            print("-"*term_width)
+
+        num_examples += 1
+
+        FN, FP = 0
+        for real, watermark in stats:
+            if watermark == False: #watermark is marked unwatermarked
+                FN += 1
+            if real == True: #unwatermarked is marked as watermarked
+                FP += 1
+        
+        print(f"FP: {FP}")
+        print(f"FN: {FN}")
 
 
     # Launch the app to generate and detect interactively (implements the hf space demo)
@@ -841,6 +891,11 @@ def main(args):
         run_gradio(args, model=model, tokenizer=tokenizer, device=device)
 
     return
+
+def remove_special_characters(text):
+    # Delete informal expression
+    cleaned_text = re.sub(r'[^\x00-\x7F]+', '', text)
+    return cleaned_text
 
 if __name__ == "__main__":
 
