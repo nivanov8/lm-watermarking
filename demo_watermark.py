@@ -365,14 +365,17 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
                 #print(input_ids[0].shape)
                 #print(input_ids.shape)
 
-
+            if i == 0 and sampled_token.item() == tokenizer.eos_token_id:
+                continue
         
             sampled_token_tensor = torch.tensor([sampled_token.item()], dtype=torch.long, device=input_ids.device)
             #print(sampled_token_tensor)
             input_ids_concatenated = torch.cat([input_ids[0], sampled_token_tensor], dim=-1)
             input_ids = torch.unsqueeze(input_ids_concatenated, dim=0)
 
+
             if sampled_token.item() == tokenizer.eos_token_id:
+                print("Here")
                 break
             #print(input_ids.shape)
             #print(input_ids)
@@ -392,6 +395,7 @@ def generate(prompt, args, model=None, device=None, tokenizer=None):
             # need to isolate the newly generated tokens
             output_without_watermark = output_without_watermark[:,tokd_input["input_ids"].shape[-1]:]
             output_with_watermark = input_ids[:,tokd_input["input_ids"].shape[-1]:]
+            print(output_with_watermark)
     
 
         decoded_output_without_watermark = tokenizer.batch_decode(output_without_watermark, skip_special_tokens=True)[0]
@@ -458,8 +462,10 @@ def detect(input_text, args, device=None, tokenizer=None):
                                         normalizers=args.normalizers,
                                         ignore_repeated_bigrams=args.ignore_repeated_bigrams,
                                         select_green_tokens=args.select_green_tokens)
+
     if len(input_text)-1 > watermark_detector.min_prefix_len:
         score_dict = watermark_detector.detect(input_text)
+        #print(score_dict)
         # output = str_format_scores(score_dict, watermark_detector.z_threshold)
         output = list_format_scores(score_dict, watermark_detector.z_threshold)
     else:
@@ -803,6 +809,9 @@ def main(args):
         #             "we are committed that our communities support them.\" Aldren Ruth Sall")
         
         #input_text = "Biomedics 1 Day Extra are daily replacement disposable contact lenses by CooperVision Hydron. Buy one box of 90 lenses. Biomedics 1 Day Extra contacts give you all the convenience of a daily disposable lens with no need for solutions, cases or cleaning and are perfect for the occasional wear. These lenses have greater comfort handling with superior ease of insertion and"
+        #input_text = "numerous aunts, uncles and cousins. She attended Shanksville Stonycreek High School and was a member of St. Paul's Lutheran Church, Buckstown. Family will receive friends from 2 to 4 p.m. and 6 p.m. until time of service at 8 p.m. Sunday at the Deaner Funeral Home, Stoystown. Rev. Robert Way officiating. Interment Lambertsville Cemetery. Contributions may be given to assist the family c/o Kay Grasser 158 Juniata St., Berlin, PA 15530, or to St. Paul's Lutheran Church, 6872 Lincoln Hwy., Stoystown, PA 15563. DeanerFuneralsAndCremations.com."
+        input_text = "AMC Networks Earnings Beat Estimates, CEO Says \'Walking Dead\' Franchise \"Will Have a Long Life\" AMC Networks on Thursday reported better-than-expected fourth-quarter earnings amid higher distribution and advertising revenue as management touted the outlook for hit show The Walking Dead, which is currently in its seventh season and which has been a big topic of debate among Wall Street analysts. AMC Networks shares were up 13.6 percent in early Thursday trading at $65.30 as investors cheered the upside earnings surprise. In the company\'s earnings report, he had similarly said: \"The Walking Dead remains the No. 1 show on television by a wide margin and is a powerful example of programming that we own and distribute that commands a loyal audience, attracts advertising revenue, and has significant ancillary revenues that will benefit our business for years to come. With a rapidly expanding studio business, we now have a growing portfolio of shows that we own that provide this kind of opportunity for our business.\" Asked about the studio business on the call, Sapan said: \"The company is becoming and has become more of a studio, rather than only a channel operator. He said that has allowed its shows to play on"
+
         realnewslike = load_dataset("allenai/c4", "realnewslike", streaming=True)
         dataset = realnewslike["train"]
         num_examples = 1
@@ -810,7 +819,7 @@ def main(args):
         for example in dataset:
             print(num_examples)
             if num_examples == 50:
-                return
+                break
             raw_text = example['text']
             words = raw_text.split()
             words = words[:200]
@@ -825,23 +834,31 @@ def main(args):
             print("Prompt:")
             print(input_text)
 
-        
 
-            #rint(f"decoded1: {tokenizer.batch_decode(tensor_data)}")
-            #print(f"decoded2: {tokenizer.batch_decode(tensor_data2)}")
-            # print(tokenizer.decode(6479))
-            # print(tokenizer.decode(7486))
-            # print(tokenizer.decode(3204))
-            # print(tokenizer.decode(163))
-            # print(tokenizer.decode(6009))
-            # print(tokenizer.decode(196))
-            # print(tokenizer.decode(3204))
+
+        #rint(f"decoded1: {tokenizer.batch_decode(tensor_data)}")
+        #print(f"decoded2: {tokenizer.batch_decode(tensor_data2)}")
+        # print(tokenizer.decode(6479))
+        # print(tokenizer.decode(7486))
+        # print(tokenizer.decode(3204))
+        # print(tokenizer.decode(163))
+        # print(tokenizer.decode(6009))
+        # print(tokenizer.decode(196))
+        # print(tokenizer.decode(3204))
+        # print(tokenizer.decode(7535))
+        # print(tokenizer.decode(29))
+        # print(tokenizer.decode(7485))
 
             _, _, decoded_output_without_watermark, decoded_output_with_watermark, _ = generate(input_text, 
                                                                                                 args, 
                                                                                                 model=model, 
                                                                                                 device=device, 
                                                                                                 tokenizer=tokenizer)
+            
+
+            if len(decoded_output_with_watermark) < 2 or len(decoded_output_without_watermark) < 2:
+                continue
+
             without_watermark_detection_result, score_dict_unwatermarked, args = detect(decoded_output_without_watermark, 
                                                         args, 
                                                         device=device, 
@@ -856,7 +873,7 @@ def main(args):
 
             stats.append((score_dict_unwatermarked["is_hamming"], score_dict_watermarked["is_hamming"]))
             print(stats)
-    
+
             print("#"*term_width)
             print("Output without watermark:")
             print(decoded_output_without_watermark)
@@ -873,15 +890,15 @@ def main(args):
             pprint(with_watermark_detection_result)
             print("-"*term_width)
 
-        num_examples += 1
+            num_examples += 1
 
-        FN, FP = 0
+        FN, FP = 0, 0
         for real, watermark in stats:
             if watermark == False: #watermark is marked unwatermarked
                 FN += 1
             if real == True: #unwatermarked is marked as watermarked
                 FP += 1
-        
+
         print(f"FP: {FP}")
         print(f"FN: {FN}")
 

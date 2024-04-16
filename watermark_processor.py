@@ -499,7 +499,7 @@ class HammingDetector(WatermarkBase):
 
         # call Hamming method
         output_dict = {}
-        print(self.tokenizer.batch_decode(tokenized_text, skip_special_tokens=True))
+        #print(self.tokenizer.batch_decode(tokenized_text, skip_special_tokens=True))
         score_dict = self._score_sequence(tokenized_text, **kwargs)
         if return_scores:
             output_dict.update(score_dict)
